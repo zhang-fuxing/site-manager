@@ -124,8 +124,8 @@ ipcMain.handle('remove-site-view', async (_, siteId: string) => {
 
     try {
       if (!view.webContents.isDestroyed()) {
-        view.webContents.destroy()
-        logger.info('[主进程] webContents.destroy() 成功')
+        view.webContents.close()
+        logger.info('[主进程] webContents.close() 成功')
       }
     } catch (e) {
       logger.error('[主进程] 销毁网页视图异常:', e)
