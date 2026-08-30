@@ -2,7 +2,7 @@
   <div class="app-layout">
     <!-- 1. 顶部水平导航栏 -->
     <header class="navbar">
-      <div class="nav-title">网址管理器</div>
+      <div class="nav-title">LINK</div>
 
       <!-- 水平滚动标签列表 -->
       <div class="tab-list">
@@ -16,7 +16,7 @@
           <!-- 核心：添加 .stop 阻止冒泡，同时设置 type="button" 确保纯粹的按钮触发 -->
           <button type="button" 
           class="delete-btn" 
-          @click.stop="deleteSite(site.id)"
+          @click.stop="confirmDeleteSite(site)"
           @mousedown.stop>✕</button>
         </div>
       </div>
@@ -41,6 +41,20 @@
         </div>
       </div>
     </div>
+
+    <!-- 4. 新增：删除网址二级确认模态框 -->
+    <div v-if="showDeleteModal" class="modal-overlay" @click.self="closeDeleteModal">
+      <div class="modal modal-danger">
+        <h3>确认删除</h3>
+        <p class="delete-tip">
+          确定要删除网址 <strong>「{{ siteToDelete?.name }}」</strong> 吗？
+        </p>
+        <div class="modal-actions">
+          <button type="button" class="cancel" @click="closeDeleteModal">取消</button>
+          <button type="button" class="danger-btn" @click="handleExecuteDelete">确认删除</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -57,6 +71,9 @@ interface Site {
 const showModal = ref(false)
 const activeSiteId = ref<string | null>(null)
 const sites = ref<Site[]>([])
+// ----- 新增：删除确认弹窗状态变量 -----
+const showDeleteModal = ref(false)
+const siteToDelete = ref<Site | null>(null)
 
 const form = ref({
   name: '',
@@ -80,6 +97,70 @@ const closeModal = async () => {
   // 关闭弹窗后，还原显示当前选中的 View
   if (activeSiteId.value && window.electronAPI?.switchSiteView) {
     await window.electronAPI.switchSiteView(activeSiteId.value)
+  }
+}
+
+// ----- 新增：控制【删除确认】模态框的显示/隐藏 -----
+const confirmDeleteSite = async (site: Site) => {
+  siteToDelete.value = site
+  // 同样需要隐藏底层 View，防止遮挡删除确认弹窗
+  if (activeSiteId.value && window.electronAPI?.switchSiteView) {
+    await window.electronAPI.switchSiteView('')
+  }
+  showDeleteModal.value = true
+}
+
+const closeDeleteModal = async () => {
+  showDeleteModal.value = false
+  siteToDelete.value = null
+  // 恢复显示当前的 View
+  if (activeSiteId.value && window.electronAPI?.switchSiteView) {
+    await window.electronAPI.switchSiteView(activeSiteId.value)
+  }
+}
+
+// 执行真正的删除逻辑
+const handleExecuteDelete = async () => {
+  if (!siteToDelete.value) return
+  const id = siteToDelete.value.id
+
+  console.log('[前端] 确认删除标签，ID:', id)
+
+  const updatedSites = sites.value.filter((s) => s.id !== id)
+
+  // 1. 通知主进程销毁 View
+  try {
+    if (window.electronAPI?.removeSiteView) {
+      await window.electronAPI.removeSiteView(id)
+    }
+  } catch (err) {
+    console.error('[前端] 销毁主进程 View 失败:', err)
+  }
+
+  // 2. 保存更新后的配置
+  await saveSites(updatedSites)
+
+  // 3. 智能焦点切换逻辑
+  if (activeSiteId.value === id) {
+    if (updatedSites.length > 0) {
+      activeSiteId.value = updatedSites[0].id
+    } else {
+      activeSiteId.value = null
+    }
+  }
+
+  // 4. 关闭弹窗并恢复底层视图（如果还有剩余站点，selectSite 会加载它；如果没有则空着）
+  showDeleteModal.value = false
+  const targetId = activeSiteId.value
+  siteToDelete.value = null
+
+  if (targetId) {
+    await selectSite(targetId)
+  } else {
+    // 没站点了，清理 View
+    if (window.electronAPI?.switchSiteView) {
+      await window.electronAPI.switchSiteView('')
+    }
   }
 }
 
@@ -151,30 +232,6 @@ const handleAddSite = async () => {
   await selectSite(newSite.id)
 }
 
-// 删除逻辑
-const deleteSite = async (id: string) => {
-  console.log('[前端] 触发删除标签，ID:', id)
-
-  const updatedSites = sites.value.filter((s) => s.id !== id)
-
-  try {
-    if (window.electronAPI?.removeSiteView) {
-      await window.electronAPI.removeSiteView(id)
-    }
-  } catch (err) {
-    console.error('[前端] 销毁主进程 View 失败:', err)
-  }
-
-  await saveSites(updatedSites)
-
-  if (activeSiteId.value === id) {
-    if (updatedSites.length > 0) {
-      await selectSite(updatedSites[0].id)
-    } else {
-      activeSiteId.value = null
-    }
-  }
-}
 </script>
 <style>
 /* 保持原样式即可 */
@@ -317,5 +374,28 @@ body, html, #app { height: 100%; font-family: sans-serif; overflow: hidden; }
 .modal-actions button.confirm { background: #4f46e5; color: white; border: none; padding: 6px 12px; border-radius: 4px; }
 .modal-actions button.confirm:hover {
   background-color: #4338ca;
+}
+
+/* 删除提示文字样式 */
+.delete-tip {
+  font-size: 14px;
+  color: #4b5563;
+  margin: 8px 0;
+  line-height: 1.5;
+}
+
+.delete-tip strong {
+  color: #111827;
+}
+
+/* 危险操作（确认删除）按钮样式 */
+.modal-actions button.danger-btn {
+  background-color: #ef4444;
+  color: white;
+  border: 1px solid transparent;
+}
+
+.modal-actions button.danger-btn:hover {
+  background-color: #dc2626;
 }
 </style>

@@ -29,8 +29,13 @@ function getPaths() {
 }
 // 初始化默认数据
 const DEFAULT_SITES: Site[] = [
-  { id: '1', name: 'DeepSeek', url: 'https://chat.deepseek.com/', partitionKey: 'group_a' },
-  { id: '2', name: 'GitHub', url: 'https://github.com', partitionKey: 'group_b' },
+  { id: '1', name: 'DeepSeek', url: 'https://chat.deepseek.com/', partitionKey: 'AI' },
+  { id: '2', name: '千问', url: 'https://www.qianwen.com/', partitionKey: 'AI' },
+  { id: '3', name: '豆包', url: 'https://www.doubao.com/chat/', partitionKey: 'AI' },
+  { id: '4', name: 'Gemini', url: 'https://gemini.google.com/app', partitionKey: 'AI' },
+  { id: '5', name: 'ChatGPT', url: 'https://chatgpt.com/', partitionKey: 'AI' },
+  { id: '6', name: 'Claude', url: 'https://claude.ai/new/', partitionKey: 'AI' },
+  { id: '7', name: 'GitHub', url: 'https://github.com', partitionKey: 'web_link' },
 ]
 
 
