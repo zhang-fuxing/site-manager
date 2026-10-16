@@ -1,9 +1,10 @@
-interface Window {
-  electronAPI: {
-    createSiteView: (site: { id: string; url: string; partitionKey?: string }) => Promise<{ success: boolean }>
-    switchSiteView: (siteId: string) => Promise<void>
-    removeSiteView: (siteId: string) => Promise<void>
-    getStoredSites: () => Promise<Array<{ id: string; name: string; url: string; partitionKey?: string }>>
-    saveStoredSites: (sites: any[]) => Promise<boolean>
+/// <reference types="vite/client" />
+
+import type { ElectronAPI } from '../shared/types'
+
+declare global {
+  interface Window {
+    /** 由 electron/preload.ts 通过 contextBridge 注入 */
+    electronAPI: ElectronAPI
   }
 }

@@ -1,401 +1,324 @@
 <template>
-  <div class="app-layout">
-    <!-- 1. 顶部水平导航栏 -->
-    <header class="navbar">
-      <div class="nav-title">LINK</div>
+  <div class="app">
+    <TabBar
+      :sites="visibleSites"
+      :active-id="activeId"
+      :states="viewStates.states"
+      :can-go-back="activeViewState?.canGoBack ?? false"
+      :can-go-forward="activeViewState?.canGoForward ?? false"
+      @select="onSelect"
+      @refresh="onRefreshTab"
+      @context="onContextMenu"
+      @manage="openManager"
+      @move="onMove"
+      @back="onBack"
+      @forward="onForward"
+    />
 
-      <!-- 水平滚动标签列表 -->
-      <div class="tab-list">
-        <div
-          v-for="site in sites"
-          :key="site.id"
-          :class="['tab-item', { active: activeSiteId === site.id }]"
-          @click="selectSite(site.id)"
-        >
-          <span class="tab-name">{{ site.name }}</span>
-          <!-- 核心：添加 .stop 阻止冒泡，同时设置 type="button" 确保纯粹的按钮触发 -->
-          <button type="button" 
-          class="delete-btn" 
-          @click.stop="confirmDeleteSite(site)"
-          @mousedown.stop>✕</button>
-        </div>
-      </div>
+    <!-- 有可见标签时这块区域会被原生网页视图盖住，只在没有可见标签时露出空状态 -->
+    <EmptyState
+      v-if="visibleSites.length === 0"
+      :all-hidden="sites.length > 0"
+      @add="onEmptyAction"
+    />
+    <main v-else class="app__canvas" />
 
-      <!-- 右侧添加按钮 -->
-      <button type="button" class="add-btn" @click="openModal()">➕ 添加网址</button>
-    </header>
+    <!-- 管理面板先渲染，确认框在其后，保证删除确认叠在面板之上 -->
+    <SiteManagerModal
+      :open="showManager"
+      :sites="sites"
+      :active-id="activeId"
+      :can-restore="tabs.hasClosed()"
+      :initial-mode="managerMode"
+      :initial-site-id="managerSiteId"
+      @close="closeManager"
+      @add="onCreateSite"
+      @update="onUpdateSite"
+      @remove="onRemoveSite"
+      @duplicate="onDuplicateSite"
+      @set-visible="onSetVisible"
+      @restore="onRestore"
+    />
 
-    <!-- 2. 下方内容占位区 -->
-    <main class="content-placeholder"></main>
+    <ConfirmDialog
+      :open="confirmRequest !== null"
+      :title="confirmRequest?.title ?? ''"
+      :message="confirmRequest?.message ?? ''"
+      :hint="confirmRequest?.hint"
+      :confirm-text="confirmRequest?.confirmText ?? '确定'"
+      :danger="confirmRequest?.danger ?? false"
+      @cancel="confirmRequest = null"
+      @confirm="runConfirm"
+    />
 
-    <!-- 3. 添加网址模态框 -->
-    <div v-if="showModal" class="modal-overlay" @click.self="closeModal">
-      <div class="modal">
-        <h3>添加自定义网址</h3>
-        <input v-model="form.name" placeholder="网站名称 (如: 百度)" />
-        <input v-model="form.url" placeholder="网址 URL (包含 https://)" />
-        <input v-model="form.partitionKey" placeholder="登录隔离组 (可选, 留空独立隔离)" />
-        <div class="modal-actions">
-          <button type="button" class="cancel" @click="closeModal">取消</button>
-          <button type="button" class="confirm" @click="handleAddSite">确定</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- 4. 新增：删除网址二级确认模态框 -->
-    <div v-if="showDeleteModal" class="modal-overlay" @click.self="closeDeleteModal">
-      <div class="modal modal-danger">
-        <h3>确认删除</h3>
-        <p class="delete-tip">
-          确定要删除网址 <strong>「{{ siteToDelete?.name }}」</strong> 吗？
-        </p>
-        <div class="modal-actions">
-          <button type="button" class="cancel" @click="closeDeleteModal">取消</button>
-          <button type="button" class="danger-btn" @click="handleExecuteDelete">确认删除</button>
-        </div>
-      </div>
-    </div>
+    <TabContextMenu
+      v-if="contextMenu"
+      :x="contextMenu?.x ?? 0"
+      :y="contextMenu?.y ?? 0"
+      :items="menuItems"
+      @select="onMenuSelect"
+      @dismiss="contextMenu = null"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import TabBar from './components/TabBar.vue'
+import EmptyState from './components/EmptyState.vue'
+import SiteManagerModal from './components/SiteManagerModal.vue'
+import ConfirmDialog from './components/ConfirmDialog.vue'
+import TabContextMenu from './components/TabContextMenu.vue'
+import { useSites } from './composables/useSites'
+import { createSiteId, useTabs } from './composables/useTabs'
+import { useViewStates } from './composables/useViewStates'
+import { useShortcuts } from './composables/useShortcuts'
+import type { MenuItem, Site } from '../shared/types'
 
-interface Site {
-  id: string
-  name: string
-  url: string
-  partitionKey?: string
+const sitesStore = useSites()
+const { sites, visibleSites, activeId } = sitesStore
+const viewStates = useViewStates()
+const tabs = useTabs(sitesStore, viewStates)
+
+type SitePayload = { name: string; url: string; partitionKey: string }
+
+// ------------------------------------------------------------------ 弹层状态
+
+const showManager = ref(false)
+const managerMode = ref<'list' | 'create' | 'edit'>('list')
+const managerSiteId = ref<string | null>(null)
+
+const contextMenu = ref<{ site: Site; x: number; y: number } | null>(null)
+
+interface ConfirmRequest {
+  title: string
+  message: string
+  hint?: string
+  confirmText: string
+  danger: boolean
+  run: () => void | Promise<void>
 }
 
-const showModal = ref(false)
-const activeSiteId = ref<string | null>(null)
-const sites = ref<Site[]>([])
-// ----- 新增：删除确认弹窗状态变量 -----
-const showDeleteModal = ref(false)
-const siteToDelete = ref<Site | null>(null)
+const confirmRequest = ref<ConfirmRequest | null>(null)
 
-const form = ref({
-  name: '',
-  url: '',
-  partitionKey: '',
+/**
+ * 原生网页视图永远绘制在 Vue 界面之上，任何弹层出现时都得让主进程整体隐藏视图，
+ * 否则弹层会被网页盖住。这里用「是否存在任意弹层」一次性驱动，避免多个弹层
+ * 交替开关时反复隐藏/恢复造成闪烁。
+ */
+const overlayOpen = computed(
+  () =>
+    showManager.value || confirmRequest.value !== null || contextMenu.value !== null,
+)
+
+watch(overlayOpen, (open) => {
+  void window.electronAPI.setOverlay(open)
 })
 
-// -------------------------------------------------------------
-// 关键优化：控制 WebContentsView 的显示/隐藏，解决 Native View 遮挡 Vue 弹窗问题
-// -------------------------------------------------------------
-const openModal = async () => {
-  // 打开弹窗前，通知 Electron 移除当前 View，防止原生视图盖住 Vue 弹窗
-  if (activeSiteId.value && window.electronAPI?.switchSiteView) {
-    await window.electronAPI.switchSiteView('') // 传入空 ID 即可暂时移除/隐藏 View
-  }
-  showModal.value = true
+// ------------------------------------------------------------------ 标签操作
+
+/** 当前激活标签的视图状态，决定前进后退按钮是否可用 */
+const activeViewState = computed(() =>
+  activeId.value ? viewStates.get(activeId.value) : undefined,
+)
+
+function onBack(): void {
+  if (activeId.value) void window.electronAPI.goBack(activeId.value)
 }
 
-const closeModal = async () => {
-  showModal.value = false
-  // 关闭弹窗后，还原显示当前选中的 View
-  if (activeSiteId.value && window.electronAPI?.switchSiteView) {
-    await window.electronAPI.switchSiteView(activeSiteId.value)
+function onForward(): void {
+  if (activeId.value) void window.electronAPI.goForward(activeId.value)
+}
+
+function onSelect(id: string): void {
+  void tabs.select(id)
+}
+
+function onMove(fromVisible: number, toVisible: number): void {
+  void tabs.move(fromVisible, toVisible)
+}
+
+/** 标签上的按钮：强制刷新（忽略缓存） */
+function onRefreshTab(site: Site): void {
+  void tabs.reload(site.id, true)
+}
+
+function onContextMenu(site: Site, event: MouseEvent): void {
+  contextMenu.value = { site, x: event.clientX, y: event.clientY }
+}
+
+// ------------------------------------------------------------------ 标签管理
+
+function openManager(): void {
+  managerMode.value = 'list'
+  managerSiteId.value = null
+  showManager.value = true
+}
+
+function openManagerForCreate(): void {
+  managerMode.value = 'create'
+  managerSiteId.value = null
+  showManager.value = true
+}
+
+function openManagerForEdit(site: Site): void {
+  managerMode.value = 'edit'
+  managerSiteId.value = site.id
+  showManager.value = true
+}
+
+function closeManager(): void {
+  showManager.value = false
+  managerMode.value = 'list'
+  managerSiteId.value = null
+}
+
+function onEmptyAction(): void {
+  if (sites.value.length === 0) openManagerForCreate()
+  else openManager()
+}
+
+async function onCreateSite(payload: SitePayload): Promise<void> {
+  await tabs.addAndSelect({
+    id: createSiteId(),
+    name: payload.name,
+    url: payload.url,
+    partitionKey: payload.partitionKey || undefined,
+  })
+}
+
+async function onUpdateSite(id: string, payload: SitePayload): Promise<void> {
+  await tabs.applyEdit(id, payload)
+}
+
+async function onDuplicateSite(site: Site): Promise<void> {
+  await tabs.duplicate(site.id)
+}
+
+function onSetVisible(id: string, visible: boolean): void {
+  void tabs.setVisible(id, visible)
+}
+
+async function onRestore(): Promise<void> {
+  await tabs.reopenLast()
+}
+
+/**
+ * 删除入口已经从标签上移到管理面板，误触概率大幅下降；
+ * 这里仍然保留一次确认，因为删除会真正从配置里移除。
+ */
+function onRemoveSite(site: Site): void {
+  confirmRequest.value = {
+    title: '确认删除站点',
+    message: `确定要删除「${site.name}」吗？`,
+    hint: '删除后会从配置中移除；可用「恢复上次删除」或 Ctrl+Shift+T 找回。',
+    confirmText: '删除',
+    danger: true,
+    run: () => tabs.removeMany([site.id]),
   }
 }
 
-// ----- 新增：控制【删除确认】模态框的显示/隐藏 -----
-const confirmDeleteSite = async (site: Site) => {
-  siteToDelete.value = site
-  // 同样需要隐藏底层 View，防止遮挡删除确认弹窗
-  if (activeSiteId.value && window.electronAPI?.switchSiteView) {
-    await window.electronAPI.switchSiteView('')
-  }
-  showDeleteModal.value = true
+async function runConfirm(): Promise<void> {
+  const request = confirmRequest.value
+  confirmRequest.value = null
+  if (request) await request.run()
 }
 
-const closeDeleteModal = async () => {
-  showDeleteModal.value = false
-  siteToDelete.value = null
-  // 恢复显示当前的 View
-  if (activeSiteId.value && window.electronAPI?.switchSiteView) {
-    await window.electronAPI.switchSiteView(activeSiteId.value)
+// ------------------------------------------------------------------ 标签右键菜单（只保留视图级操作）
+
+const menuItems = computed<MenuItem[]>(() => {
+  if (!contextMenu.value) return []
+  return [
+    { key: 'reload', label: '重新加载' },
+    { key: 'hard-reload', label: '强制刷新（忽略缓存）' },
+    { key: 'hide', label: '隐藏此标签', separatorBefore: true },
+    { key: 'manage', label: '在标签管理中编辑' },
+  ]
+})
+
+async function onMenuSelect(key: string): Promise<void> {
+  const context = contextMenu.value
+  contextMenu.value = null
+  if (!context) return
+
+  const { site } = context
+
+  if (key === 'reload') {
+    await tabs.reload(site.id)
+    return
+  }
+  if (key === 'hard-reload') {
+    await tabs.reload(site.id, true)
+    return
+  }
+  if (key === 'hide') {
+    await tabs.setVisible(site.id, false)
+    return
+  }
+  if (key === 'manage') {
+    openManagerForEdit(site)
   }
 }
 
-// 执行真正的删除逻辑
-const handleExecuteDelete = async () => {
-  if (!siteToDelete.value) return
-  const id = siteToDelete.value.id
+// ------------------------------------------------------------------ 快捷键
 
-  console.log('[前端] 确认删除标签，ID:', id)
-
-  const updatedSites = sites.value.filter((s) => s.id !== id)
-
-  // 1. 通知主进程销毁 View
-  try {
-    if (window.electronAPI?.removeSiteView) {
-      await window.electronAPI.removeSiteView(id)
+useShortcuts({
+  addTab: openManagerForCreate,
+  closeActive: () => {
+    // 标签上的 ✕ 已经移除，Ctrl+W 改为「隐藏当前标签」这个可逆操作，
+    // 删除只能在标签管理里完成。
+    const id = activeId.value
+    if (id) void tabs.setVisible(id, false)
+  },
+  nextTab: () => void tabs.cycle(1),
+  prevTab: () => void tabs.cycle(-1),
+  reopenClosed: () => void tabs.reopenLast(),
+  jumpToTab: (position) => {
+    // Ctrl+9 约定为最后一个标签，与浏览器一致
+    if (position === 9) void tabs.jumpToLast()
+    else void tabs.jumpTo(position - 1)
+  },
+  dismissOverlay: () => {
+    if (contextMenu.value) {
+      contextMenu.value = null
+      return true
     }
-  } catch (err) {
-    console.error('[前端] 销毁主进程 View 失败:', err)
-  }
-
-  // 2. 保存更新后的配置
-  await saveSites(updatedSites)
-
-  // 3. 智能焦点切换逻辑
-  if (activeSiteId.value === id) {
-    if (updatedSites.length > 0) {
-      activeSiteId.value = updatedSites[0].id
-    } else {
-      activeSiteId.value = null
+    if (confirmRequest.value) {
+      confirmRequest.value = null
+      return true
     }
-  }
-
-  // 4. 关闭弹窗并恢复底层视图（如果还有剩余站点，selectSite 会加载它；如果没有则空着）
-  showDeleteModal.value = false
-  const targetId = activeSiteId.value
-  siteToDelete.value = null
-
-  if (targetId) {
-    await selectSite(targetId)
-  } else {
-    // 没站点了，清理 View
-    if (window.electronAPI?.switchSiteView) {
-      await window.electronAPI.switchSiteView('')
+    if (showManager.value) {
+      closeManager()
+      return true
     }
-  }
-}
+    return false
+  },
+})
 
-// 持久化存储数据
-const saveSites = async (newSites: Site[]) => {
-  sites.value = newSites
-  
-  if (window.electronAPI?.saveStoredSites) {
-    // 关键修复：深拷贝脱敏，去掉 Vue 的 Proxy 响应式包装
-    const rawData = JSON.parse(JSON.stringify(newSites))
-    await window.electronAPI.saveStoredSites(rawData)
-  }
-}
+// ------------------------------------------------------------------ 生命周期
 
-// 页面加载时读取配置
 onMounted(async () => {
-  try {
-    if (window.electronAPI?.getStoredSites) {
-      const loadedSites = await window.electronAPI.getStoredSites()
-      sites.value = loadedSites || []
-      console.log('读取存储配置成功:', sites.value)
-      
-      if (sites.value.length > 0) {
-        await selectSite(sites.value[0].id)
-      }
-    }
-  } catch (err) {
-    console.error('读取存储配置失败:', err)
-  }
+  await sitesStore.load()
+
+  // 恢复上次激活的标签；被删掉或已被隐藏则退回第一个可见标签
+  const restored = activeId.value ? sitesStore.findById(activeId.value) : undefined
+  const target = restored && restored.visible !== false ? restored : visibleSites.value[0]
+
+  if (target) await tabs.select(target.id)
+  else await tabs.clearFocus()
 })
-
-// 选中并切换网页
-const selectSite = async (id: string) => {
-  const site = sites.value.find((s) => s.id === id)
-  if (!site) return
-
-  activeSiteId.value = id
-  if (window.electronAPI) {
-    await window.electronAPI.createSiteView({
-      id: site.id,
-      url: site.url,
-      partitionKey: site.partitionKey,
-    })
-    await window.electronAPI.switchSiteView(site.id)
-  }
-}
-
-// 添加新网址
-const handleAddSite = async () => {
-  if (!form.value.name || !form.value.url) return
-
-  let formattedUrl = form.value.url
-  if (!/^https?:\/\//i.test(formattedUrl)) {
-    formattedUrl = 'https://' + formattedUrl
-  }
-
-  const newSite: Site = {
-    id: Date.now().toString(),
-    name: form.value.name,
-    url: formattedUrl,
-    partitionKey: form.value.partitionKey || undefined,
-  }
-
-  // 1. 补上 await 确保数据落盘写入 json
-  await saveSites([...sites.value, newSite])
-  await closeModal()
-  form.value = { name: '', url: '', partitionKey: '' }
-  // 2. 自动选中并加载新添加的标签
-  await selectSite(newSite.id)
-}
-
 </script>
-<style>
-/* 保持原样式即可 */
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body, html, #app { height: 100%; font-family: sans-serif; overflow: hidden; }
 
-.app-layout {
+<style scoped>
+.app {
   display: flex;
   flex-direction: column;
-  height: 100vh;
-}
-
-.navbar {
-  height: 50px;
-  background-color: #1e1e2d;
-  color: #fff;
-  display: flex;
-  align-items: center;
-  padding: 0 16px;
-  border-bottom: 1px solid #2b2b40;
-  gap: 16px;
-
-  /* 新增：提升导航栏层级，确保点击事件能正常触发 */
-  position: relative;
-  z-index: 100;
-}
-
-.nav-title {
-  font-size: 15px;
-  font-weight: bold;
-  white-space: nowrap;
-}
-
-.tab-list {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: 1;
-  overflow-x: auto;
   height: 100%;
 }
 
-.tab-list::-webkit-scrollbar { display: none; }
-
-.tab-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  background-color: #2b2b40;
-  padding: 6px 12px;
-  border-radius: 6px 6px 0 0;
-  font-size: 13px;
-  cursor: pointer;
-  white-space: nowrap;
-  max-width: 180px;
-  transition: background 0.2s;
-  user-select: none;
-}
-
-.tab-item:hover { background-color: #383852; }
-.tab-item.active { background-color: #4f46e5; color: white; }
-
-.tab-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.delete-btn {
-  background: transparent;
-  border: none;
-  color: #aaa;
-  cursor: pointer;
-  font-size: 12px;
-  padding: 2px 4px;
-  border-radius: 50%;
-  /* 新增：确保按钮响应指针事件 */
-  pointer-events: auto;
-}
-.delete-btn:hover { color: #fff; background-color: #ff4d4f; }
-
-.add-btn {
-  padding: 6px 12px;
-  background: #4f46e5;
-  color: white;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  white-space: nowrap;
-  font-size: 13px;
-}
-
-.content-placeholder {
-  flex: 1;
-  background-color: #f5f5f5;
-}
-
-.modal-overlay {
-  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-  background: rgba(0, 0, 0, 0.5);
-  display: flex; align-items: center; justify-content: center;
-  z-index: 9999;
-}
-.modal {
-  background: white; padding: 20px; border-radius: 8px; width: 320px;
-  display: flex; flex-direction: column; gap: 12px;
-}
-.modal input { padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
-/* 弹窗底部按钮容器布局 */
-.modal-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-  margin-top: 8px;
-}
-
-/* 统一按钮基础样式 */
-.modal-actions button {
-  padding: 6px 16px;
-  border-radius: 4px;
-  font-size: 13px;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  outline: none;
-}
-
-/* 取消按钮样式 */
-.modal-actions button.cancel {
-  background-color: #f3f4f6;
-  color: #4b5563;
-  border: 1px solid #d1d5db;
-}
-
-.modal-actions button.cancel:hover {
-  background-color: #e5e7eb;
-  color: #1f2937;
-  border-color: #9ca3af;
-}
-
-.modal-actions button.confirm { background: #4f46e5; color: white; border: none; padding: 6px 12px; border-radius: 4px; }
-.modal-actions button.confirm:hover {
-  background-color: #4338ca;
-}
-
-/* 删除提示文字样式 */
-.delete-tip {
-  font-size: 14px;
-  color: #4b5563;
-  margin: 8px 0;
-  line-height: 1.5;
-}
-
-.delete-tip strong {
-  color: #111827;
-}
-
-/* 危险操作（确认删除）按钮样式 */
-.modal-actions button.danger-btn {
-  background-color: #ef4444;
-  color: white;
-  border: 1px solid transparent;
-}
-
-.modal-actions button.danger-btn:hover {
-  background-color: #dc2626;
+.app__canvas {
+  flex: 1 1 auto;
+  min-height: 0;
+  background: var(--bg-canvas);
 }
 </style>

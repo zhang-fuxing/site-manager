@@ -1,0 +1,75 @@
+/* ------------------------------------------------------------------ 设计变量 */
+:root {
+  /* 顶部标签栏高度。必须与 electron/view-manager.ts 的 HEADER_HEIGHT 保持一致，
+     它决定了原生网页视图从哪一行像素开始绘制。 */
+  --header-height: 50px;
+
+  --bg-header: #1b1c28;
+  --bg-header-border: #2b2d3d;
+  --bg-tab: #262838;
+  --bg-tab-hover: #33354c;
+  --bg-tab-active: #4f46e5;
+  --bg-tab-active-hover: #5b53ea;
+  --bg-canvas: #f4f5f8;
+
+  --text-primary: #eef0f6;
+  --text-muted: #99a0b8;
+
+  --accent: #4f46e5;
+  --accent-hover: #4338ca;
+  --danger: #ef4444;
+  --danger-hover: #dc2626;
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+
+  --shadow-menu: 0 12px 32px rgba(15, 17, 26, 0.3);
+}
+
+/* ------------------------------------------------------------------ 基础重置 */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  font-size: 13px;
+  color: #1f2330;
+  background: var(--bg-canvas);
+  overflow: hidden;
+  /* 应用外壳不需要选中文字，输入框内部仍然可以正常选择 */
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+input {
+  font: inherit;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(120, 126, 150, 0.45);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}

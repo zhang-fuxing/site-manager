@@ -2,11 +2,14 @@
   "name": "site-manager",
   "private": true,
   "version": "0.0.1",
+  "description": "多标签页桌面端网址管理工具：站点标签手动增删改与显隐配置、拖拽排序，以及同站点多账号登录隔离",
+  "author": "zhangfx <zhangfuxing1010@163.com>",
   "main": "dist-electron/main.js",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc && vite build",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.app.json",
     "clean": "rimraf dist dist-electron release logs config",
     "pack:win": "npm run build && electron-builder --win --x64",
     "pack:linux": "npm run build && electron-builder --linux",
@@ -26,7 +29,6 @@
     "typescript": "~6.0.2",
     "vite": "^8.2.2",
     "vite-plugin-electron": "^1.1.1",
-    "vite-plugin-electron-renderer": "^1.0.0",
     "vue-tsc": "^3.3.11"
   },
   "build": {
