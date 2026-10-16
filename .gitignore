@@ -28,3 +28,7 @@ dist
 dist-electron/
 config
 release
+
+# 自检产物（npm run test 的输出）
+test/report.txt
+test/trace.txt
