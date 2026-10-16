@@ -1,5 +1,6 @@
 import { ref } from 'vue'
 import type { Site } from '../../shared/types'
+import { isLegacyBuiltinGroup, resolvePersistPartition } from '../../shared/site-partition'
 import type { SitesStore } from './useSites'
 import type { ViewStateStore } from './useViewStates'
 
@@ -23,7 +24,21 @@ export function createSiteId(): string {
 export interface EditPayload {
   name: string
   url: string
+  /** 'isolated' 独立会话；'group' 与同组站点共用会话 */
+  partitionMode: 'isolated' | 'group'
+  /** partitionMode 为 'group' 时的组名 */
   partitionKey: string
+}
+
+/** 表单 payload → 落盘的站点字段；选了共享隔离组但没填组名时退回独立会话 */
+function toSiteFields(
+  payload: EditPayload,
+): Pick<Site, 'name' | 'url' | 'partitionMode' | 'partitionKey'> {
+  const group = payload.partitionMode === 'group' ? payload.partitionKey.trim() : ''
+
+  return group
+    ? { name: payload.name, url: payload.url, partitionMode: 'group', partitionKey: group }
+    : { name: payload.name, url: payload.url, partitionMode: 'isolated' }
 }
 
 export interface TabsStore {
@@ -44,6 +59,20 @@ export interface TabsStore {
   reload: (id: string, ignoreCache?: boolean) => Promise<void>
   /** 拖拽排序，下标基于「可见标签」序列 */
   move: (fromVisible: number, toVisible: number) => Promise<void>
+  /**
+   * 把仍在使用旧版默认隔离组的站点拆成独立会话。
+   * 返回被拆分的站点数。
+   */
+  splitLegacyGroups: () => Promise<number>
+}
+
+/** 取站点地址的 host，用于判断隔离组里装的是不是不同的网站 */
+function siteHost(url: string): string {
+  try {
+    return new URL(url).host
+  } catch {
+    return url
+  }
 }
 
 /**
@@ -64,7 +93,8 @@ export function useTabs(store: SitesStore, viewStates: ViewStateStore): TabsStor
   async function select(id: string): Promise<void> {
     const site = store.findById(id)
     if (!site) return
-    await window.electronAPI.focusSite({ ...site })
+    // 只把 id 交给主进程：站点的 url / 隔离组属于服务端（主进程）数据，不能由渲染进程指定
+    await window.electronAPI.focusSite(id)
     store.activeId.value = id
   }
 
@@ -98,28 +128,27 @@ export function useTabs(store: SitesStore, viewStates: ViewStateStore): TabsStor
     const previous = store.findById(id)
     if (!previous) return
 
-    const nextPartition = payload.partitionKey || undefined
-    const partitionChanged = (previous.partitionKey ?? '') !== (nextPartition ?? '')
+    const fields = toSiteFields(payload)
+    const nextPartition = resolvePersistPartition({ ...previous, ...fields })
+    const previousPartition = resolvePersistPartition(previous)
 
-    await store.update(id, {
-      name: payload.name,
-      url: payload.url,
-      partitionKey: nextPartition,
-    })
+    await store.update(id, fields)
 
-    // 隔离组变了意味着要换一个 Session，旧视图必须整体重建
-    if (partitionChanged) {
-      await window.electronAPI.removeView(id)
+    // 隔离组变了意味着要换一套 Session，而 Session 只能在创建视图时指定，
+    // 所以必须先销毁旧视图，再让 ensure 用新分区重建
+    if (nextPartition !== previousPartition) {
+      await window.electronAPI.discardView(id)
       viewStates.drop(id)
     }
 
-    // 地址变化由主进程在 ensure 时检测并重新加载
+    // 地址变化（或刚被销毁重建）由主进程在 ensure 时处理
     if (store.activeId.value === id) await select(id)
   }
 
   async function duplicate(id: string): Promise<void> {
     const site = store.findById(id)
     if (!site) return
+    // 副本沿用同一个隔离组：两张标签共用登录态，这正是「同站点多账号」的用法
     const copy: Site = { ...site, id: createSiteId(), name: `${site.name} 副本` }
     await store.insertAt(copy, store.indexOf(id) + 1)
     if (site.visible !== false) await select(copy.id)
@@ -158,10 +187,9 @@ export function useTabs(store: SitesStore, viewStates: ViewStateStore): TabsStor
 
     if (visible) return
 
-    // 隐藏后不再需要它的视图，顺手释放掉
-    viewStates.drop(id)
-    await window.electronAPI.removeView(id)
-
+    // 隐藏只是从标签栏收起来，视图保留：
+    // 用户随时会再勾回来，而销毁意味着正在生成的回答、没提交的表单全部丢失。
+    // 真正占着不用的视图会在删除站点或清理会话时释放。
     if (wasActive) await focusAfterGap(anchorIndex < 0 ? 0 : anchorIndex)
   }
 
@@ -209,8 +237,7 @@ export function useTabs(store: SitesStore, viewStates: ViewStateStore): TabsStor
     await window.electronAPI.reloadView(id, ignoreCache)
   }
 
-  async function move(fromVisible: number, toVisible: number): Promise<void> {
-    // TabBar 给出的插入位就在原位时无需处理
+  async function move(fromVisible: number, toVisible: number): Promise<void> {    // TabBar 给出的插入位就在原位时无需处理
     if (toVisible === fromVisible || toVisible === fromVisible + 1) return
 
     const visible = store.visibleSites.value
@@ -230,6 +257,33 @@ export function useTabs(store: SitesStore, viewStates: ViewStateStore): TabsStor
     await store.reorder(next)
   }
 
+  /**
+   * 拆掉旧版默认隔离组。
+   *
+   * 早期版本给 6 个不同的 AI 站点都写了 partitionKey: 'AI'，等于让它们共用一个
+   * Cookie Jar。判断依据是「组内出现了多个**不同**的站点地址」：
+   * 同一网站的两个标签共用组是「多账号」的正常用法，那种情况不动它。
+   */
+  async function splitLegacyGroups(): Promise<number> {
+    const legacy = store.sites.value.filter((site) => isLegacyBuiltinGroup(site))
+    if (legacy.length === 0) return 0
+
+    const hosts = new Set(legacy.map((site) => siteHost(site.url)))
+    if (hosts.size <= 1) return 0
+
+    for (const site of legacy) {
+      await store.update(site.id, { partitionMode: 'isolated', partitionKey: undefined })
+
+      // 旧视图挂在旧分区上，必须销毁重建，否则界面显示的和实际会话会对不上
+      await window.electronAPI.discardView(site.id)
+      viewStates.drop(site.id)
+    }
+
+    const active = store.activeId.value
+    if (active && legacy.some((site) => site.id === active)) await select(active)
+    return legacy.length
+  }
+
   return {
     select,
     clearFocus,
@@ -245,5 +299,6 @@ export function useTabs(store: SitesStore, viewStates: ViewStateStore): TabsStor
     jumpToLast,
     reload,
     move,
+    splitLegacyGroups,
   }
 }

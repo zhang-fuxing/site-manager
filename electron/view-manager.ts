@@ -1,6 +1,7 @@
 import { BrowserWindow, WebContentsView, shell } from 'electron'
-import type { WebContents } from 'electron'
+import type { PermissionRequest, WebContents } from 'electron'
 import { logger } from './logger'
+import { resolvePersistPartition } from '../shared/site-partition'
 import type { Site, ViewState } from '../shared/types'
 
 /**
@@ -11,6 +12,34 @@ const HEADER_HEIGHT = 50
 
 /** 加载被主动打断（例如站内跳转取消了上一次请求）不应该算失败 */
 const ERR_ABORTED = -3
+
+/**
+ * 无需询问即可放行的权限：都只影响页面内交互，不泄露用户数据。
+ * 全屏是看视频/Live 必备项，挡掉会显得应用坏了；剪贴板只放行「写入」，
+ * 读取剪贴板（clipboard-read）涉及隐私，仍然拒绝。
+ */
+const SAFE_PERMISSIONS = new Set([
+  'fullscreen',
+  'clipboard-sanitized-write',
+  'pointerLock',
+  'background-sync',
+  'idle-detection',
+])
+
+/** 只读/非隐私的媒体能力，其余媒体权限（摄像头等）一律拒绝 */
+const SAFE_MEDIA_TYPES = new Set(['audio'])
+
+function isSafePermission(permission: string, details?: PermissionRequest): boolean {
+  if (SAFE_PERMISSIONS.has(permission)) return true
+  if (permission === 'media') {
+    const types = (details as { mediaTypes?: Array<'video' | 'audio'> } | undefined)?.mediaTypes ?? []
+    return types.length > 0 && types.every((type) => SAFE_MEDIA_TYPES.has(type))
+  }
+  return false
+}
+
+/** 允许交给系统处理的协议：其余（自定义 scheme、file: 等）一律忽略 */
+const EXTERNAL_PROTOCOLS = /^(mailto|tel|sms|magnet):/i
 
 export interface ViewManagerHooks {
   /** 某个视图状态变化，用于推送给渲染进程 */
@@ -23,14 +52,19 @@ export interface ViewManagerHooks {
  * 管理所有站点的原生网页视图。
  *
  * 设计要点：视图一旦创建就常驻在窗口视图树里，切换标签只改可见性，
- * 不再做「摘掉旧视图 / 挂上新视图」——那样会丢掉页面状态，
- * 且在弹层需要临时隐藏视图时无从恢复。页面保活与切换速度都更好。
+ * 不做「摘掉旧视图 / 挂上新视图」——那样会丢掉页面状态。
+ *
+ * 「标签被隐藏」也不再销毁视图：隐藏是可逆的（随时能勾回来），
+ * 而销毁意味着用户正在生成中的回答、没提交的表单全部丢失。
+ * 只有真正删除站点、或站点换了隔离组（必须换 Session）时才销毁视图。
  */
 export class ViewManager {
   private readonly views = new Map<string, WebContentsView>()
   private readonly states = new Map<string, ViewState>()
   /** 站点配置的起始地址，与 state.url（可能已被站内跳转改写）分开记录 */
   private readonly configuredUrls = new Map<string, string>()
+  /** 视图当前挂载的 persist 分区名，用于识别「隔离组被改过」 */
+  private readonly partitions = new Map<string, string>()
   private readonly hooks: ViewManagerHooks
   private win: BrowserWindow | null = null
   private activeId: string | null = null
@@ -49,22 +83,26 @@ export class ViewManager {
     })
   }
 
-  /** 确保站点视图已存在；站点地址被编辑过时自动重新加载 */
+  /** 确保站点视图已存在；站点地址或隔离组被编辑过时自动重建 / 重新加载 */
   ensure(site: Site): boolean {
     const existing = this.views.get(site.id)
     if (existing) return this.refresh(site, existing)
     if (!this.win) return false
 
+    const partition = resolvePersistPartition(site)
+
     const view = new WebContentsView({
       webPreferences: {
-        // 同一隔离组共用 Session，实现同站点多账号并存
-        partition: `persist:${site.partitionKey || site.id}`,
+        // 同一隔离组共用 Session，实现同站点多账号并存；
+        // 独立隔离的站点用各自的 id 作分区，互不共享 Cookie 与 LocalStorage
+        partition: `persist:${partition}`,
         nodeIntegration: false,
         contextIsolation: true,
       },
     })
 
     this.views.set(site.id, view)
+    this.partitions.set(site.id, partition)
     this.configuredUrls.set(site.id, site.url)
     this.states.set(site.id, {
       id: site.id,
@@ -85,7 +123,7 @@ export class ViewManager {
     this.applyVisibility()
     this.load(view, site.url)
 
-    logger.info('[ViewManager] 创建视图:', site.id, site.url)
+    logger.info('[ViewManager] 创建视图:', site.id, `分区: ${partition}`, site.url)
     return true
   }
 
@@ -97,6 +135,19 @@ export class ViewManager {
 
   getActiveId(): string | null {
     return this.activeId
+  }
+
+  /** 当前存在视图的站点 id，供会话清理等场景比对配置 */
+  listIds(): string[] {
+    return [...this.views.keys()]
+  }
+
+  /** 当前激活视图的 webContents，供快捷键决定开发者工具开在哪里 */
+  getActiveContents(): WebContents | null {
+    if (!this.activeId) return null
+    const view = this.views.get(this.activeId)
+    if (!view || view.webContents.isDestroyed()) return null
+    return view.webContents
   }
 
   /**
@@ -130,12 +181,19 @@ export class ViewManager {
     return this.travel(id, 'forward')
   }
 
+  /**
+   * 销毁视图（删除站点、或隔离组变更需要换 Session 时调用）。
+   * 隐藏标签**不要**走这里，见类注释。
+   *
+   * 只销毁视图本身，不动 activeId：调用方可能是「重建视图」，
+   * 那样把激活项清掉会让主进程与落盘状态短暂不一致。
+   */
   remove(id: string): boolean {
     const view = this.views.get(id)
     this.views.delete(id)
     this.states.delete(id)
     this.configuredUrls.delete(id)
-    if (this.activeId === id) this.activeId = null
+    this.partitions.delete(id)
     if (!view) return false
 
     try {
@@ -170,6 +228,15 @@ export class ViewManager {
   private refresh(site: Site, view: WebContentsView): boolean {
     const state = this.states.get(site.id)
     if (state) state.name = site.name
+
+    // 换了隔离组就必须换一个 Session，而 webPreferences 只能在创建时指定，
+    // 所以这里把旧视图整体销毁，交给下一次 ensure 重建（渲染进程会再调一次 focusSite）。
+    const partition = resolvePersistPartition(site)
+    if (this.partitions.get(site.id) !== partition) {
+      logger.info('[ViewManager] 隔离组已变更，重建视图:', site.id, '->', partition)
+      this.remove(site.id)
+      return false
+    }
 
     if (this.configuredUrls.get(site.id) !== site.url) {
       this.configuredUrls.set(site.id, site.url)
@@ -210,9 +277,29 @@ export class ViewManager {
     })
   }
 
+  /**
+   * 会话权限的默认策略：只放行那些不涉及隐私、且挡住就会明显坏体验的能力，
+   * 其余（摄像头、定位、通知、剪贴板读取、HID/串口……）一律拒绝。
+   *
+   * 这些页面是常驻的、用户不会一直盯着，弹权限询问框既打断操作又容易被顺手点掉；
+   * 真需要摄像头的站点，在下面的白名单里单独加一项即可。
+   */
+  private guardPermissions(site: Site, view: WebContentsView): void {
+    const ses = view.webContents.session
+    // 同一个隔离组会被多个站点共用，重复设置只是覆盖，没有副作用
+    ses.setPermissionRequestHandler((_contents, permission, callback, details) => {
+      const allowed = isSafePermission(permission, details)
+      if (!allowed) logger.warn('[ViewManager] 拒绝站点权限请求:', site.name, permission)
+      callback(allowed)
+    })
+    ses.setPermissionCheckHandler((_contents, permission) => isSafePermission(permission))
+  }
+
   private wire(site: Site, view: WebContentsView): void {
     const wc = view.webContents
     const id = site.id
+
+    this.guardPermissions(site, view)
 
     wc.on('page-title-updated', (_event, title) => this.patch(id, { title }))
     wc.on('page-favicon-updated', (_event, favicons) =>
@@ -229,6 +316,17 @@ export class ViewManager {
       this.patch(id, { loading: false, error: `${description}（${code}）` })
     })
 
+    // 渲染进程崩溃（OOM、站点自身 bug）时页面会变成一片空白，
+    // 没有任何事件的话用户只能重启应用，这里给出可重试的错误态。
+    wc.on('render-process-gone', (_event, details) => {
+      if (details.reason === 'clean-exit') return
+      logger.error('[ViewManager] 渲染进程退出:', id, details.reason, details.exitCode)
+      this.patch(id, {
+        loading: false,
+        error: `页面进程已退出（${details.reason}），点击刷新可重新加载`,
+      })
+    })
+
     wc.setWindowOpenHandler(({ url }) => {
       // 站点自己发起的「开新标签 / 开新窗口」一律在当前标签内就地导航：
       // 标签栏只保留用户手动添加的标签，浏览体验更接近单页应用。
@@ -237,9 +335,11 @@ export class ViewManager {
         setImmediate(() => {
           if (!wc.isDestroyed()) this.load(view, url)
         })
-      } else {
+      } else if (EXTERNAL_PROTOCOLS.test(url)) {
         // mailto: / tel: 之类没有页面可渲染，交给系统处理
         void shell.openExternal(url)
+      } else {
+        logger.warn('[ViewManager] 忽略无法处理的跳转协议:', url)
       }
       return { action: 'deny' }
     })

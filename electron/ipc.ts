@@ -1,8 +1,9 @@
-import { ipcMain } from 'electron'
+import { BrowserWindow, ipcMain } from 'electron'
 import { logger } from './logger'
-import { readState, updateState } from './store'
+import { clearOrphanSessions, countOrphanSessions, diagnosticOrphans, readState, updateState } from './store'
+import { readWindowBounds, saveWindowBounds } from './window-state'
 import type { ViewManager } from './view-manager'
-import type { Site } from '../shared/types'
+import type { Site, WindowBounds } from '../shared/types'
 
 /**
  * 注册渲染进程可调用的 IPC 处理器。
@@ -22,9 +23,18 @@ export function registerIpc(views: ViewManager): void {
     return true
   })
 
-  // 确保视图存在并激活，同时记住这个选择供下次启动恢复
-  ipcMain.handle('view:focus', (_event, site: Site) => {
-    if (!site || typeof site.id !== 'string') return false
+  /**
+   * 确保视图存在并激活，同时记住这个选择供下次启动恢复。
+   *
+   * 这里只接受站点 id，站点的真实配置从主进程自己的状态里取：
+   * 渲染进程传来的对象是不可信输入（url / partitionKey 会直接决定加载地址和 Session），
+   * 走 id 查表就不存在被绕过的余地。
+   */
+  ipcMain.handle('view:focus', (_event, id: string) => {
+    if (typeof id !== 'string') return false
+    const site = readState().sites.find((item) => item.id === id)
+    if (!site) return false
+
     views.ensure(site)
     views.setActive(site.id)
     updateState({ activeSiteId: site.id })
@@ -38,7 +48,22 @@ export function registerIpc(views: ViewManager): void {
     return true
   })
 
-  ipcMain.handle('view:remove', (_event, id: string) => views.remove(id))
+  ipcMain.handle('view:remove', (_event, id: string) => {
+    const removed = views.remove(id)
+    // 视图被销毁后主进程里就不该再有激活项，顺手把落盘状态对齐
+    if (removed && views.getActiveId() === id) views.setActive(null)
+    if (removed && readState().activeSiteId === id) updateState({ activeSiteId: null })
+    return removed
+  })
+
+  /**
+   * 只销毁视图，不动站点配置。
+   *
+   * 隔离组被改过时旧视图挂的是旧 Session，必须先丢掉再由下一次 ensure 重建；
+   * 此刻站点还在配置里，所以 activeSiteId **不能**像删除那样被清空——
+   * 否则用户改完隔离组、重启应用后就丢了「上次激活的标签」。
+   */
+  ipcMain.handle('view:discard', (_event, id: string) => views.remove(id))
 
   ipcMain.handle('view:reload', (_event, id: string, ignoreCache?: boolean) =>
     views.reload(id, Boolean(ignoreCache)),
@@ -52,5 +77,28 @@ export function registerIpc(views: ViewManager): void {
   // 弹层（模态框、右键菜单）打开时隐藏所有原生视图
   ipcMain.handle('overlay:set', (_event, open: boolean) => {
     views.setOverlay(Boolean(open))
+  })
+
+  /** 清理已经没有任何站点引用的会话残留（删掉的站点、改过隔离组的旧分区） */
+  ipcMain.handle('sessions:cleanup', () => {
+    // 清理前先把视图里已经不在配置中的站点销毁，避免清掉正在使用的分区
+    const known = new Set(readState().sites.map((site) => site.id))
+    for (const id of views.listIds()) {
+      if (!known.has(id)) views.remove(id)
+    }
+    return clearOrphanSessions()
+  })
+
+  ipcMain.handle('sessions:count-orphans', () => countOrphanSessions())
+
+  /** 会话清理的诊断详情，见 store.ts 的 diagnosticOrphans */
+  ipcMain.handle('sessions:diagnose', () => diagnosticOrphans())
+
+  // ------------------------------------------------------------------ 窗口
+  ipcMain.handle('window:get-bounds', () => readWindowBounds())
+
+  ipcMain.handle('window:save-bounds', (event, bounds: WindowBounds) => {
+    saveWindowBounds(bounds, BrowserWindow.fromWebContents(event.sender))
+    return true
   })
 }

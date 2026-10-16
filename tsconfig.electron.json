@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.electron.tsbuildinfo",
+    "target": "es2023",
+    "lib": ["ES2023"],
+    "types": ["node"],
+    /* 与 vite.config.ts 一致：源码由 Vite/Rollup 打包，写的是无扩展名的相对导入，
+       所以这里必须用 bundler 解析，不能用 nodenext（那会要求 ./x.js 后缀）。 */
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "skipLibCheck": true,
+    "noEmit": true,
+
+    /* 主进程代码一直是靠 Vite 打包时才暴露类型问题，
+       这里单独建一份配置，让 npm run typecheck 也能覆盖 electron/ 与 shared/ */
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["electron/**/*.ts", "shared/**/*.ts"]
+}

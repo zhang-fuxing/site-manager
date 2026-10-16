@@ -1,5 +1,6 @@
 import { computed, ref } from 'vue'
 import type { ComputedRef, Ref } from 'vue'
+import { resolvePartitionMode } from '../../shared/site-partition'
 import type { Site } from '../../shared/types'
 
 /** 省略 visible 字段一律视为展示，这样旧配置不需要迁移 */
@@ -20,6 +21,8 @@ export interface SitesStore {
   activeId: Ref<string | null>
   /** 是否已完成首次磁盘读取 */
   ready: Ref<boolean>
+  /** 首次读取失败时的提示，为空表示正常 */
+  loadError: Ref<string>
   load: () => Promise<void>
   findById: (id: string) => Site | undefined
   indexOf: (id: string) => number
@@ -29,6 +32,10 @@ export interface SitesStore {
   removeMany: (ids: string[]) => Promise<Site[]>
   /** 拖拽排序：直接传入重排后的完整数组（隐藏站点相对位置也随之确定） */
   reorder: (next: Site[]) => Promise<void>
+  /** 现有隔离组名（去重、排序），供表单「加入已有隔离组」使用 */
+  groupNames: ComputedRef<string[]>
+  /** 清理已无站点引用的会话数据，返回一句结果文案 */
+  cleanupSessions: () => Promise<string>
 }
 
 /**
@@ -41,6 +48,7 @@ export function useSites(): SitesStore {
   const sites = ref<Site[]>([])
   const activeId = ref<string | null>(null)
   const ready = ref(false)
+  const loadError = ref('')
 
   const visibleSites = computed(() => sites.value.filter(isSiteVisible))
 
@@ -49,10 +57,19 @@ export function useSites(): SitesStore {
   }
 
   async function load(): Promise<void> {
-    const state = await window.electronAPI.getState()
-    sites.value = state.sites ?? []
-    activeId.value = state.activeSiteId
-    ready.value = true
+    try {
+      const state = await window.electronAPI.getState()
+      sites.value = state.sites ?? []
+      activeId.value = state.activeSiteId
+      loadError.value = ''
+    } catch (err) {
+      // 读不到配置时不要装作「一个站点都没有」，否则用户会以为数据丢了
+      loadError.value = err instanceof Error ? err.message : String(err)
+      sites.value = []
+      activeId.value = null
+    } finally {
+      ready.value = true
+    }
   }
 
   function findById(id: string): Site | undefined {
@@ -76,7 +93,16 @@ export function useSites(): SitesStore {
   }
 
   async function update(id: string, patch: Partial<Omit<Site, 'id'>>): Promise<void> {
-    sites.value = sites.value.map((site) => (site.id === id ? { ...site, ...patch } : site))
+    sites.value = sites.value.map((site) => {
+      if (site.id !== id) return site
+      const next = { ...site, ...patch }
+      // 显式写 undefined 的字段（例如把 visible 恢复成默认）直接从对象上摘掉，
+      // 否则 IPC 结构化克隆会把 undefined 传过去，落盘时又是一堆冗余键
+      for (const key of Object.keys(next) as Array<keyof Site>) {
+        if (next[key] === undefined) delete next[key]
+      }
+      return next
+    })
     await save()
   }
 
@@ -94,11 +120,39 @@ export function useSites(): SitesStore {
     await save()
   }
 
+  /** 现有隔离组名：与「独立会话」区分开，只统计真正共享会话的组 */
+  const groupNames = computed(() => {
+    const names = new Set<string>()
+    for (const site of sites.value) {
+      if (resolvePartitionMode(site) !== 'group') continue
+      const key = site.partitionKey?.trim()
+      if (key) names.add(key)
+    }
+    return [...names].sort((a, b) => a.localeCompare(b))
+  })
+
+  /**
+   * 清理会话残留。
+   *
+   * 删掉的站点、改过隔离组的旧分区不会自己消失，里面还是完整的 Cookie，
+   * 所以这里给用户一个显式入口，而不是让它们悄悄堆在 userData 里。
+   */
+  async function cleanupSessions(): Promise<string> {
+    try {
+      const result = await window.electronAPI.cleanupSessions()
+      if (result.removed === 0) return '没有需要清理的会话数据。'
+      return `已清理 ${result.removed} 份会话数据：${result.partitions.join('、')}`
+    } catch (err) {
+      return `清理失败：${err instanceof Error ? err.message : String(err)}`
+    }
+  }
+
   return {
     sites,
     visibleSites,
     activeId,
     ready,
+    loadError,
     load,
     findById,
     indexOf,
@@ -107,5 +161,7 @@ export function useSites(): SitesStore {
     update,
     removeMany,
     reorder,
+    groupNames,
+    cleanupSessions,
   }
 }

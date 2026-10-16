@@ -22,12 +22,13 @@
       v-else
       type="button"
       class="tab__action"
-      title="强制刷新（忽略缓存）"
+      :class="{ 'is-error': !!state?.error }"
+      :title="state?.error ? `加载失败：${state.error}\n点击重试` : '强制刷新（忽略缓存）'"
       draggable="false"
       @click.stop="emit('refresh')"
       @mousedown.stop
     >
-      <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true">
+      <svg v-if="!state?.error" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true">
         <polyline
           points="23 4 23 10 17 10"
           fill="none"
@@ -45,6 +46,7 @@
           stroke-linejoin="round"
         />
       </svg>
+      <span v-else class="tab__warn">!</span>
     </button>
   </div>
 </template>
@@ -136,6 +138,11 @@ const tooltip = computed(() => {
   text-decoration: underline dotted var(--danger);
 }
 
+/* 出错时不要播放「刷新」按钮的旋转动画，那个旋转表示的是刷新动作 */
+.tab__action.is-error:hover {
+  transform: none;
+}
+
 .tab__favicon {
   display: flex;
   flex: 0 0 14px;
@@ -184,8 +191,25 @@ const tooltip = computed(() => {
 }
 
 .tab:hover .tab__action,
-.tab.is-active .tab__action {
+.tab.is-active .tab__action,
+.tab__action.is-error {
   opacity: 0.75;
+}
+
+/* 加载失败的标签：错误标记常驻可见，别让用户还要悬停才发现出错了 */
+.tab__action.is-error {
+  opacity: 1;
+  color: var(--danger);
+}
+
+.tab.is-active .tab__action.is-error {
+  color: #ffd7d7;
+}
+
+.tab__warn {
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
 }
 
 .tab__action:hover {

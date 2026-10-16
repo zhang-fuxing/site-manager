@@ -10,10 +10,31 @@
       </header>
 
       <!-- 表单态：新增 / 编辑 -->
-      <SiteForm v-if="mode === 'form'" :site="editing" @submit="onFormSubmit" @cancel="backToList" />
+      <SiteForm
+        v-if="mode === 'form'"
+        :site="editing"
+        :group-names="groupNames"
+        @submit="onFormSubmit"
+        @cancel="backToList"
+      />
 
       <!-- 列表态 -->
       <template v-else>
+        <!-- 历史遗留：多个不同站点共用一个隔离组，属于旧版本默认值造成的问题 -->
+        <div v-if="legacyCount > 0" class="manager__notice">
+          <div class="manager__notice-text">
+            有 {{ legacyCount }} 个站点仍在使用旧版的「AI」隔离组，它们之间共用同一套
+            Cookie 与 LocalStorage。不同站点之间共享会话没有任何用处，只会放大风险。
+          </div>
+          <button
+            type="button"
+            class="btn btn--small"
+            :disabled="cleanupBusy"
+            @click="emit('split-legacy')"
+          >
+            拆成独立会话
+          </button>        </div>
+
         <div class="manager__list">
           <p v-if="sites.length === 0" class="manager__empty">还没有任何站点，先新增一个吧。</p>
 
@@ -40,14 +61,14 @@
             </div>
 
             <span
-              v-if="site.partitionKey"
               class="manager__group"
-              :title="`登录隔离组：${site.partitionKey}`"
+              :class="{
+                'manager__group--none': partitionOf(site) === '独立',
+                'manager__group--warn': isLegacy(site),
+              }"
+              :title="partitions[site.id]"
             >
-              {{ site.partitionKey }}
-            </span>
-            <span v-else class="manager__group manager__group--none" title="无隔离组，独立会话">
-              独立
+              {{ partitionOf(site) }}
             </span>
 
             <div class="manager__ops">
@@ -71,10 +92,30 @@
           <button type="button" class="btn" :disabled="!canRestore" @click="emit('restore')">
             恢复上次删除
           </button>
+          <button
+            type="button"
+            class="btn btn--small"
+            :disabled="cleanupBusy || orphanCount === 0"
+            :title="
+              orphanCount === 0
+                ? '没有可清理的会话数据'
+                : `清理 ${orphanCount} 份已无站点引用的会话数据（Cookie / LocalStorage）`
+            "
+            @click="emit('cleanup')"
+          >
+            {{ cleanupBusy ? '清理中…' : `清理会话残留（${orphanCount}）` }}
+          </button>
           <span class="manager__count">
             共 {{ sites.length }} 个，标签栏显示 {{ visibleCount }} 个
           </span>
         </footer>
+
+        <p v-if="cleanupResult" class="manager__result">
+          {{ cleanupResult }}
+          <button type="button" class="manager__link" @click="emit('inspect')">查看会话详情</button>
+        </p>
+
+        <pre v-if="diagnostics" class="manager__diagnostics">{{ diagnostics }}</pre>
       </template>
     </div>
   </div>
@@ -83,7 +124,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import SiteForm from './SiteForm.vue'
-import type { Site } from '../../shared/types'
+import { describePartition, isLegacyBuiltinGroup, resolvePersistPartition } from '../../shared/site-partition'
+import type { Site, SiteFormPayload } from '../../shared/types'
 
 const props = defineProps<{
   open: boolean
@@ -91,6 +133,16 @@ const props = defineProps<{
   sites: Site[]
   activeId: string | null
   canRestore: boolean
+  /** 现有隔离组名，传给表单做「加入已有隔离组」 */
+  groupNames: string[]
+  /** 当前可清理的会话残留数量 */
+  orphanCount: number
+  /** 会话清理进行中 */
+  cleanupBusy: boolean
+  /** 上一次清理的结果文案，为空表示还没清理过 */
+  cleanupResult: string
+  /** 会话诊断详情（点「查看会话详情」后填充） */
+  diagnostics: string
   /** 打开时直接进入哪个界面 */
   initialMode?: 'list' | 'create' | 'edit'
   initialSiteId?: string | null
@@ -98,18 +150,48 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   close: []
-  add: [payload: { name: string; url: string; partitionKey: string }]
-  update: [id: string, payload: { name: string; url: string; partitionKey: string }]
+  add: [payload: SiteFormPayload]
+  update: [id: string, payload: SiteFormPayload]
   remove: [site: Site]
   duplicate: [site: Site]
   setVisible: [id: string, visible: boolean]
   restore: []
+  /** 把仍在使用旧版 AI 组的站点拆成独立会话 */
+  'split-legacy': []
+  /** 清理没有站点引用的会话数据 */
+  cleanup: []
+  /** 查看会话残留的诊断详情 */
+  inspect: []
 }>()
 
 const mode = ref<'list' | 'form'>('list')
 const editing = ref<Site | null>(null)
 
 const visibleCount = computed(() => props.sites.filter((site) => site.visible !== false).length)
+
+const legacyCount = computed(() => props.sites.filter((site) => isLegacyBuiltinGroup(site)).length)
+
+/** 每个站点的会话归属说明，键是站点 id */
+const partitions = computed(() => {
+  const map: Record<string, string> = {}
+  for (const site of props.sites) {
+    const mode = describePartition(site)
+    map[site.id] =
+      mode === '独立'
+        ? '独立会话：不与其他站点共用 Cookie 与 LocalStorage'
+        : `隔离组「${mode}」：与组内站点共用会话（分区 ${resolvePersistPartition(site)}）`
+  }
+  return map
+})
+
+function partitionOf(site: Site): string {
+  const mode = describePartition(site)
+  return mode === '独立' ? '独立' : `组：${mode}`
+}
+
+function isLegacy(site: Site): boolean {
+  return isLegacyBuiltinGroup(site)
+}
 
 const heading = computed(() => {
   if (mode.value !== 'form') return '标签管理'
@@ -158,7 +240,7 @@ function backToList(): void {
   mode.value = 'list'
 }
 
-function onFormSubmit(payload: { name: string; url: string; partitionKey: string }): void {
+function onFormSubmit(payload: SiteFormPayload): void {
   const target = editing.value
   backToList()
   if (target) emit('update', target.id, payload)
@@ -174,7 +256,7 @@ function onToggle(id: string, event: Event): void {
 .manager {
   display: flex;
   flex-direction: column;
-  width: 620px;
+  width: 660px;
   max-width: calc(100vw - 80px);
   max-height: calc(100vh - 120px);
   padding: 18px 20px 16px;
@@ -220,6 +302,24 @@ function onToggle(id: string, event: Event): void {
 .manager__close:hover {
   background: #f0f1f5;
   color: #1f2330;
+}
+
+.manager__notice {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid #fde68a;
+  border-radius: 6px;
+  background: #fffbeb;
+}
+
+.manager__notice-text {
+  flex: 1 1 auto;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: #92400e;
 }
 
 .manager__list {
@@ -308,6 +408,11 @@ function onToggle(id: string, event: Event): void {
   color: #b6bac7;
 }
 
+.manager__group--warn {
+  background: #fef3c7;
+  color: #92400e;
+}
+
 .manager__ops {
   display: flex;
   flex: 0 0 auto;
@@ -338,7 +443,8 @@ function onToggle(id: string, event: Event): void {
 .manager__foot {
   display: flex;
   align-items: center;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 8px;
   padding-top: 12px;
   border-top: 1px solid #eef0f5;
 }
@@ -347,5 +453,37 @@ function onToggle(id: string, event: Event): void {
   margin-left: auto;
   font-size: 11.5px;
   color: #8a90a3;
+}
+
+.manager__result {
+  margin: 8px 0 0;
+  font-size: 11.5px;
+  color: #4b5563;
+}
+
+.manager__link {
+  margin-left: 8px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-size: 11.5px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.manager__diagnostics {
+  max-height: 140px;
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  overflow: auto;
+  border-radius: var(--radius-sm);
+  background: #f5f6fa;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  color: #4b5563;
+  white-space: pre-wrap;
+  user-select: text;
 }
 </style>
