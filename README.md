@@ -190,6 +190,31 @@ npm run build
 
 exe 里的「产品名称 / 发布者 / 版权」来自 `package.json` 的 `name`、`productName`、`description` 与 `author`。
 
+### 依赖下载走国内镜像
+
+打包时 electron-builder 需要下载 Electron 二进制（约 150MB）以及 nsis 等打包工具。**这些下载不看 `.npmrc`**：Electron 走 `@electron/get`，工具走 electron-builder 自己的下载器，它们只认环境变量或构建配置。国内直连 GitHub 会非常慢甚至卡住，所以镜像写在了项目的 `package.json` 里：
+
+```json
+"build": {
+  "electronDownload": {
+    "mirror": "https://npmmirror.com/mirrors/electron/",
+    "customDir": "v{{ version }}"
+  }
+}
+```
+
+`customDir` 里的 `v` 前缀不能省：镜像站把版本目录命名为 `v44.0.0`，少了 `v` 会 404。改为别的镜像时，先确认该站的目录结构再动这两个字段。
+
+打包工具（nsis / winCodeSign 等）如果也下载不动，用环境变量指定：
+
+```bash
+ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/
+```
+
+> 缓存说明：Electron 的 zip 会缓存在 `%LOCALAPPDATA%\electron\Cache`，缓存目录名是**下载 URL 的 sha256**。换镜像就等于换 URL，旧缓存不会被复用（会重新下载一次）；打包工具缓存在 `%LOCALAPPDATA%\electron-builder\Cache`，与 URL 无关。
+>
+> 若 `npm run pack:win` 卡在 `Downloading electron-v...zip`，说明镜像没生效、正在走 GitHub，Ctrl+C 停掉后按上面的配置检查即可。
+
 1. 打包 Windows 程序 (64 位)
 
 ```bash

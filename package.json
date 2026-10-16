@@ -44,6 +44,10 @@
       "dist/**/*",
       "dist-electron/**/*"
     ],
+    "electronDownload": {
+      "mirror": "https://npmmirror.com/mirrors/electron/",
+      "customDir": "v{{ version }}"
+    },
     "win": {
       "target": [
         {
