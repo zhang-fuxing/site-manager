@@ -27,6 +27,21 @@ function cjsLib(entry: string, fileName: string) {
 
 // https://vite.dev/config/
 export default defineConfig({
+  /**
+   * 开发服务器端口。
+   *
+   * 有些 Windows 机器会把 5173 划进「保留端口段」（`netsh interface ipv4 show
+   * excludedportrange protocol=tcp` 可查，常见区间 4535-5240），此时监听会直接
+   * 报 EACCES，表现就是 npm run dev 启动失败、Electron 窗口根本不出现。
+   * package.json 的 dev 脚本默认传了 5300 规避这一点，也可以随时覆盖：
+   *   npm run dev -- --port 6100
+   *   SITE_MANAGER_DEV_PORT=6100 npm run dev
+   */
+  server: {
+    port: Number(process.env.SITE_MANAGER_DEV_PORT) || 5173,
+    // 端口被占用时自动顺延，而不是直接失败退出
+    strictPort: false,
+  },
   plugins: [
     vue(),
     electron([
@@ -42,6 +57,11 @@ export default defineConfig({
           options.reload()
         },
         vite: cjsLib('electron/preload.ts', 'preload.cjs'),
+      },
+      {
+        // 自检入口：只把 store 的导出重新暴露出来，供 npm run test 在 Electron 里加载
+        entry: 'electron/test-entry.ts',
+        vite: cjsLib('electron/test-entry.ts', 'test-entry.cjs'),
       },
     ]),
   ],

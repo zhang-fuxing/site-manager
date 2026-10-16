@@ -7,12 +7,13 @@
   "main": "dist-electron/main.cjs",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --port 5300",
     "build": "npm run typecheck && rimraf dist-electron && vite build",
     "typecheck": "vue-tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.electron.json",
     "typecheck:app": "vue-tsc --noEmit -p tsconfig.app.json",
     "typecheck:electron": "tsc --noEmit -p tsconfig.electron.json",
-    "clean": "rimraf dist dist-electron release logs config",
+    "test": "rimraf test/report.txt test/trace.txt && vite build && node scripts/run-tests.mjs",
+    "clean": "rimraf dist dist-electron release logs config test/report.txt test/trace.txt",
     "pack:win": "npm run build && electron-builder --win --x64",
     "pack:linux": "npm run build && electron-builder --linux",
     "pack:all": "npm run build && electron-builder --win --linux"

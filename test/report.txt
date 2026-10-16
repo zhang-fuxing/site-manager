@@ -1,0 +1,32 @@
+PASS  v1 裸数组迁移到 v3  :: version=3
+PASS  丢掉非法 url、残缺条目与重复 id  :: len=3
+PASS  没有分区字段的站点推断为独立会话
+PASS  有组名的旧站点保留为共享组（登录态不丢）
+PASS  visible:false 保留
+PASS  javascript: 地址被拒绝
+PASS  file: 地址被拒绝
+PASS  迁移时把历史组名记进 usedPartitions（否则旧会话永远清不掉）  :: ["AI","isolated-a","isolated-c"]
+PASS  默认站点两两不同分区（不再共用一个 Cookie Jar）  :: isolated-1,isolated-2,isolated-3,isolated-4,isolated-5,isolated-6,isolated-7
+PASS  默认站点全部为独立会话
+PASS  独立会话分区带 isolated- 前缀（不会与组名撞名）  :: isolated-1
+PASS  站点 id 与组名同名时不会共用会话  :: isolated-zhihu vs zhihu
+PASS  activeSiteId 指向存在的站点时保留（隐藏也保留）
+PASS  activeSiteId 指向已删除站点时回退到首个站点
+PASS  配置损坏时回退到默认站点且不抛错  :: len=7
+PASS  保存站点后 usedPartitions 收录新分区  :: ["isolated-y","zhihu"]
+PASS  activePartitions 只反映当前引用
+PASS  替换站点后新分区仍被登记（长度不变的场景）  :: ["isolated-y","zhihu","isolated-w"]
+PASS  幽灵分区里确实写入了 Cookie  :: count=1
+PASS  诊断能列出可清理项  :: ["isolated-ghost","isolated-y","vanished-partition"]
+PASS  诊断能列出正在使用的分区
+PASS  清理结果包含真实存在的孤儿分区  :: {"removed":3,"partitions":["isolated-ghost","isolated-y","vanished-partition"]}
+PASS  记录里已消失的分区也被忘掉
+PASS  仍被引用的分区不会被清理
+PASS  不相关的分区目录不受影响
+PASS  幽灵分区的 Cookie 已被真实清空  :: count=0
+PASS  清理后不再有残留  :: count=0
+PASS  数据已清空但目录删不掉时，会记进 prunedPartitions 待下次启动回收  :: ["isolated-ghost"]
+PASS  config 里不再记录已清理的分区  :: ["zhihu","isolated-w"]
+
+29/29 passed
+RESULT: OK

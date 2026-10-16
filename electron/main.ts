@@ -40,11 +40,16 @@ if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
   app.on('second-instance', () => {
-    if (!mainWindow || mainWindow.isDestroyed()) return
+    logger.info('[主进程] 收到第二次启动请求，尝试激活已有窗口')
+
+    // 窗口还没建好（例如启动瞬间又被拉起一次），交给正常的启动流程
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      if (app.isReady() && BrowserWindow.getAllWindows().length === 0) createWindow()
+      return
+    }
     if (mainWindow.isMinimized()) mainWindow.restore()
     mainWindow.show()
     mainWindow.focus()
-    logger.info('[主进程] 收到第二次启动请求，已激活已有窗口')
   })
 
   void start()
