@@ -1,7 +1,7 @@
 {
   "name": "site-manager",
   "private": true,
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "多标签页桌面端网址管理工具：站点标签手动增删改与显隐配置、拖拽排序，以及同站点多账号登录隔离",
   "author": "zhangfx <zhangfuxing1010@163.com>",
   "main": "dist-electron/main.cjs",

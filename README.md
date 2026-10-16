@@ -192,7 +192,9 @@ exe 里的「产品名称 / 发布者 / 版权」来自 `package.json` 的 `name
 
 ### 依赖下载走国内镜像
 
-打包时 electron-builder 需要下载 Electron 二进制（约 150MB）以及 nsis 等打包工具。**这些下载不看 `.npmrc`**：Electron 走 `@electron/get`，工具走 electron-builder 自己的下载器，它们只认环境变量或构建配置。国内直连 GitHub 会非常慢甚至卡住，所以镜像写在了项目的 `package.json` 里：
+打包时 electron-builder 需要下载 Electron 二进制（约 150MB）以及 nsis 等打包工具。**这些下载不看 `.npmrc`**：Electron 走 `@electron/get`，工具走 electron-builder 自己的下载器，它们只认环境变量或构建配置。国内直连 GitHub 会非常慢甚至卡住，所以镜像**两处都配了**，互为兜底：
+
+**1. `package.json`（推荐，不依赖环境）** —— 直接指定 Electron 二进制的下载地址：
 
 ```json
 "build": {
@@ -205,11 +207,18 @@ exe 里的「产品名称 / 发布者 / 版权」来自 `package.json` 的 `name
 
 `customDir` 里的 `v` 前缀不能省：镜像站把版本目录命名为 `v44.0.0`，少了 `v` 会 404。改为别的镜像时，先确认该站的目录结构再动这两个字段。
 
-打包工具（nsis / winCodeSign 等）如果也下载不动，用环境变量指定：
+**2. `.npmrc`（覆盖 `npm install` 与打包工具）** —— 这个文件里的镜像键**是有效的**，别看着警告就删：
 
-```bash
+```ini
+registry=https://registry.npmmirror.com
+electron_mirror=https://npmmirror.com/mirrors/electron/
+ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
 ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/
 ```
+
+- npm 9+ 会对后三行打印 `Unknown project config` 警告 —— 那只是提示，不是错误。
+- 但 npm 依然会把它们写成环境变量（`electron_mirror` → `npm_config_electron_mirror`），而 `@electron/get` / `electron-builder` 正是通过环境变量读镜像：`@electron/get` 的取值顺序里 `npm_config_electron_mirror` 是**最高优先级**。删掉这几行，打包就会回落 GitHub 并卡在 `Downloading electron-v...zip`。
+- `ELECTRON_BUILDER_BINARIES_MIRROR` 管的是 nsis / winCodeSign 等打包工具的下载，`package.json` 里配不到，只能靠这里或系统环境变量。
 
 > 缓存说明：Electron 的 zip 会缓存在 `%LOCALAPPDATA%\electron\Cache`，缓存目录名是**下载 URL 的 sha256**。换镜像就等于换 URL，旧缓存不会被复用（会重新下载一次）；打包工具缓存在 `%LOCALAPPDATA%\electron-builder\Cache`，与 URL 无关。
 >
